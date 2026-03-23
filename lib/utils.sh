@@ -27,6 +27,33 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $*" >&2
 }
 
+# ─── User Notification ────────────────────────────────────────────────────
+# Cross-platform: macOS (osascript + say), Linux (notify-send), fallback (bell)
+
+notify_user() {
+    local title="$1"
+    local message="$2"
+    local urgency="${3:-normal}"  # normal | critical
+
+    # Sanitize for osascript: remove chars that break AppleScript strings
+    local safe_title="${title//\!/}"
+    local safe_message="${message//\!/}"
+
+    # macOS
+    if command -v osascript &>/dev/null; then
+        osascript -e "display notification \"$safe_message\" with title \"$safe_title\" sound name \"Glass\"" 2>/dev/null || true
+        if [[ "$urgency" == "critical" ]]; then
+            say -v Samantha "Harness alert: $safe_message" &>/dev/null &
+        fi
+    # Linux
+    elif command -v notify-send &>/dev/null; then
+        notify-send -u "$urgency" "$title" "$message" 2>/dev/null || true
+    fi
+
+    # Terminal bell (always)
+    printf '\a'
+}
+
 log_header() {
     echo ""
     echo -e "${BOLD}════════════════════════════════════════════════════════════${NC}"

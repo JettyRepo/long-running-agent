@@ -28,41 +28,32 @@ Set up the project with proper structure, dependencies, and tooling:
 ### 3. Generate `init.sh`
 Create an `init.sh` script in the project root that:
 - Installs any dependencies (e.g., `npm install`, `pip install -r requirements.txt`)
-- Starts the dev server or application in the background
-- Waits for the server to be ready (if applicable)
+- Verifies the environment is ready (compilers, runtimes, etc.)
 - Prints a clear message when ready
 - Is idempotent (safe to run multiple times)
-- Handles cleanup of previous runs (kill old processes)
 
 Make it executable (`chmod +x init.sh`).
+
+**CRITICAL — DO NOT start background processes (servers, watchers, etc.) in init.sh:**
+- This script runs inside Claude's Bash tool. Any background process that writes to stdout/stderr will block the tool indefinitely, causing the entire session to hang.
+- If tests need a running server, start it inside the test setup/teardown (e.g., pytest fixture, beforeAll), NOT in init.sh.
+- If a background process is absolutely unavoidable, you MUST redirect ALL output: `cmd > /dev/null 2>&1 & disown`
 
 Example structure:
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Kill any previous instance
-pkill -f "your-app" 2>/dev/null || true
-sleep 1
-
 # Install dependencies
 npm install
 
-# Start dev server in background
-npm run dev &
-DEV_PID=$!
+# Verify build works
+npm run build
 
-# Wait for server to be ready
-for i in $(seq 1 30); do
-    if curl -s http://localhost:3000 > /dev/null 2>&1; then
-        echo "Dev server ready on http://localhost:3000 (PID: $DEV_PID)"
-        exit 0
-    fi
-    sleep 1
-done
+# Verify test runner works
+npx jest --version
 
-echo "ERROR: Dev server failed to start"
-exit 1
+echo "Init complete."
 ```
 
 ### 4. Generate `features.json`

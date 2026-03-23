@@ -14,10 +14,16 @@ source "$SCRIPT_DIR/lib/utils.sh"
 PROJECT_DIR="./project"
 MAX_SESSIONS=50
 MODEL="sonnet"
+ESCALATION_MODEL="opus"
 MCP_CONFIG=""
 SKIP_INIT=false
 DRY_RUN=false
 GOAL=""
+
+# ─── Stall Detection & Auto-Escalation ─────────────────────────────────────
+
+STALL_THRESHOLD=3          # consecutive 0-progress sessions before escalation
+SKIP_AFTER_ATTEMPTS=5      # skip a feature after this many total failed attempts
 
 # ─── Usage ──────────────────────────────────────────────────────────────────
 
@@ -31,6 +37,9 @@ Options:
   -d, --dir <path>        Working directory for the project (default: ./project)
   -m, --max-sessions <n>  Maximum number of coding sessions (default: 50)
   -M, --model <model>     Claude model to use (default: sonnet)
+  -E, --escalation-model  Model to escalate to on stall (default: opus)
+  --stall-threshold <n>   Sessions with 0 progress before escalation (default: 3)
+  --skip-after <n>        Skip feature after n failed attempts (default: 5)
   --mcp-config <path>     MCP config file to pass to Claude
   --skip-init             Skip initializer, resume from existing artifacts
   --dry-run               Show what would be executed without running
@@ -40,6 +49,7 @@ Examples:
   $(basename "$0") "Build a REST API for a todo app with Node.js and Express"
   $(basename "$0") -d ./my-app -m 30 "Build a CLI markdown-to-HTML converter in Python"
   $(basename "$0") --skip-init -d ./my-app "Continue building the app"
+  $(basename "$0") -M sonnet -E opus --stall-threshold 3 "Build my project"
 EOF
     exit 0
 }
@@ -58,6 +68,18 @@ while [[ $# -gt 0 ]]; do
             ;;
         -M|--model)
             MODEL="$2"
+            shift 2
+            ;;
+        -E|--escalation-model)
+            ESCALATION_MODEL="$2"
+            shift 2
+            ;;
+        --stall-threshold)
+            STALL_THRESHOLD="$2"
+            shift 2
+            ;;
+        --skip-after)
+            SKIP_AFTER_ATTEMPTS="$2"
             shift 2
             ;;
         --mcp-config)
@@ -142,12 +164,15 @@ render_prompt() {
 
 if [[ "$DRY_RUN" == true ]]; then
     log_header "DRY RUN"
-    echo "Goal:           $GOAL"
-    echo "Project dir:    $PROJECT_DIR"
-    echo "Max sessions:   $MAX_SESSIONS"
-    echo "Model:          $MODEL"
-    echo "MCP config:     ${MCP_CONFIG:-none}"
-    echo "Skip init:      $SKIP_INIT"
+    echo "Goal:              $GOAL"
+    echo "Project dir:       $PROJECT_DIR"
+    echo "Max sessions:      $MAX_SESSIONS"
+    echo "Model:             $MODEL"
+    echo "Escalation model:  $ESCALATION_MODEL"
+    echo "Stall threshold:   $STALL_THRESHOLD sessions"
+    echo "Skip after:        $SKIP_AFTER_ATTEMPTS attempts"
+    echo "MCP config:        ${MCP_CONFIG:-none}"
+    echo "Skip init:         $SKIP_INIT"
     echo ""
 
     if [[ "$SKIP_INIT" == false ]]; then
@@ -182,15 +207,21 @@ echo "Max sessions: $MAX_SESSIONS"
 echo "Model:        $MODEL"
 echo ""
 
-# Initialize harness log
-echo "=== Harness Log ===" > "$HARNESS_LOG"
-echo "Goal: $GOAL" >> "$HARNESS_LOG"
-echo "Started: $(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$HARNESS_LOG"
-echo "Model: $MODEL" >> "$HARNESS_LOG"
+# Initialize harness log (append on resume, create on fresh start)
+if [[ "$SKIP_INIT" == true && -f "$HARNESS_LOG" ]]; then
+    echo "" >> "$HARNESS_LOG"
+    echo "=== Resumed: $(date -u '+%Y-%m-%dT%H:%M:%SZ') Model: $MODEL ===" >> "$HARNESS_LOG"
+else
+    echo "=== Harness Log ===" > "$HARNESS_LOG"
+    echo "Goal: $GOAL" >> "$HARNESS_LOG"
+    echo "Started: $(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$HARNESS_LOG"
+    echo "Model: $MODEL" >> "$HARNESS_LOG"
+fi
 
 # ─── Build Extra Args ──────────────────────────────────────────────────────
 
 EXTRA_ARGS=()
+REASONING_EFFORT="medium"   # default for normal coding sessions
 if [[ -n "$MCP_CONFIG" ]]; then
     EXTRA_ARGS+=(--mcp-config "$MCP_CONFIG")
 fi
@@ -212,17 +243,45 @@ if [[ "$SKIP_INIT" == false ]]; then
 
     INIT_START=$(date +%s)
 
-    log_info "Starting initializer session..."
+    # Phase 1 uses the strongest model with max effort and extended timeout.
+    # The initializer does the most critical architectural work: goal analysis,
+    # feature decomposition (20-200 features), scaffold creation.
+    # Poor planning here cascades into every subsequent session.
+    INIT_MODEL="$ESCALATION_MODEL"
+    export SESSION_TIMEOUT=3600   # 1 hour wall-clock for planning
+    export IDLE_TIMEOUT=600       # 10 min idle (planning involves long thinking)
+
+    log_info "Starting initializer session... (model: $INIT_MODEL, effort: max, timeout: 1h)"
+
+    # ── Phase 1 stall watchdog: warn user at 30 min ──
+    (
+        sleep 1800  # 30 minutes
+        if kill -0 $$ 2>/dev/null; then  # harness still running = init not done
+            notify_user "Harness: Phase 1 Slow" \
+                "Initializer running >30min. May be stuck. Check terminal." \
+                "critical"
+            log_warn "Phase 1 has been running for 30 minutes — check for issues"
+        fi
+    ) &
+    INIT_WATCHDOG_PID=$!
+
     init_exit=0
-    run_claude_session "$INIT_PROMPT_FILE" "$PROJECT_DIR" "$MODEL" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} || init_exit=$?
+    run_claude_session "$INIT_PROMPT_FILE" "$PROJECT_DIR" "$INIT_MODEL" --effort max ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} || init_exit=$?
     rm -f "$INIT_PROMPT_FILE"
+
+    # Kill the 30-min watchdog (init finished before 30 min)
+    kill "$INIT_WATCHDOG_PID" 2>/dev/null || true
+    wait "$INIT_WATCHDOG_PID" 2>/dev/null || true
 
     INIT_END=$(date +%s)
     INIT_DURATION=$(( INIT_END - INIT_START ))
 
     if [[ $init_exit -ne 0 ]]; then
-        log_error "Initializer session failed (exit code: $init_exit)"
+        log_error "Initializer session failed (exit code: $init_exit, duration: ${INIT_DURATION}s)"
         log_session "$HARNESS_LOG" 0 0 0 "$INIT_DURATION" "$init_exit"
+        notify_user "Harness: Phase 1 Failed" \
+            "Initializer failed after ${INIT_DURATION}s (exit $init_exit). Check terminal." \
+            "critical"
         exit 1
     fi
 
@@ -230,6 +289,9 @@ if [[ "$SKIP_INIT" == false ]]; then
     if ! validate_artifacts "$PROJECT_DIR"; then
         log_error "Initializer session completed but artifacts are missing."
         log_error "Expected: init.sh, features.json, claude-progress.txt, .git/"
+        notify_user "Harness: Phase 1 Incomplete" \
+            "Initializer finished but artifacts missing. Check terminal." \
+            "critical"
         exit 1
     fi
 
@@ -237,6 +299,9 @@ if [[ "$SKIP_INIT" == false ]]; then
     read -r passed total <<< "$(check_features_progress "$FEATURES_FILE")"
     log_success "Initializer complete. Features: $passed/$total $(progress_bar "$passed" "$total")"
     log_session "$HARNESS_LOG" 0 "$passed" "$total" "$INIT_DURATION" 0
+    notify_user "Harness: Phase 1 Done" \
+        "Initializer complete in ${INIT_DURATION}s. $total features planned. Starting coding loop." \
+        "normal"
 
 else
     log_info "Skipping initializer (--skip-init)"
@@ -248,6 +313,82 @@ else
     log_info "Resuming with $passed/$total features passing"
 fi
 
+# ─── Helper: Get Current Target Feature Priority ─────────────────────────
+
+get_target_feature_priority() {
+    local features_file="$1"
+    jq -r '
+        [.features[] | select(.passes == false)]
+        | sort_by(.priority // 999, .id)
+        | .[0].priority // 999
+    ' "$features_file" 2>/dev/null || echo 999
+}
+
+get_target_feature_id() {
+    local features_file="$1"
+    jq -r '
+        [.features[] | select(.passes == false)]
+        | sort_by(.priority // 999, .id)
+        | .[0].id // "unknown"
+    ' "$features_file" 2>/dev/null || echo "unknown"
+}
+
+# ─── Helper: Dynamic Timeout Based on Feature Priority ────────────────────
+
+compute_session_timeout() {
+    local priority="$1"
+    case "$priority" in
+        1) echo 1800 ;;    # 30 min for simple features
+        2) echo 3600 ;;    # 60 min for medium features
+        3) echo 5400 ;;    # 90 min for complex features
+        *)  echo 7200 ;;   # 120 min for hard/edge features
+    esac
+}
+
+# ─── Helper: Skip Feature in features.json ────────────────────────────────
+
+skip_feature() {
+    local features_file="$1"
+    local feature_id="$2"
+
+    # Record skip in a sidecar file
+    local skip_file="${features_file%.json}.skipped.json"
+    if [[ ! -f "$skip_file" ]]; then
+        echo '{}' > "$skip_file"
+    fi
+    local timestamp
+    timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    jq --arg id "$feature_id" --arg ts "$timestamp" \
+        '.[$id] = {skipped_at: $ts}' "$skip_file" > "${skip_file}.tmp" \
+        && mv "${skip_file}.tmp" "$skip_file"
+
+    # Mark as passes: true with a skip marker in features.json so harness moves on
+    # We use a temp file to safely edit
+    jq --arg id "$feature_id" '
+        .features = [.features[] |
+            if .id == $id then .passes = true | .skipped = true
+            else . end
+        ]
+    ' "$features_file" > "${features_file}.tmp" \
+        && mv "${features_file}.tmp" "$features_file"
+
+    log_warn "Skipped $feature_id — marked as passes:true (skipped) to unblock progress"
+}
+
+# ─── Helper: Count Attempts for a Feature in Progress Log ─────────────────
+
+count_feature_attempts() {
+    local progress_file="$1"
+    local feature_id="$2"
+    if [[ ! -f "$progress_file" ]]; then
+        echo 0
+        return
+    fi
+    local count
+    count=$(grep -c -E "FAILED.*${feature_id}|${feature_id}.*FAILED|Session.*${feature_id}" "$progress_file" 2>/dev/null) || count=0
+    echo "$count"
+}
+
 # ─── Phase 2: Coding Loop ──────────────────────────────────────────────────
 
 log_header "Phase 2: Coding Sessions"
@@ -257,6 +398,12 @@ CONSECUTIVE_FAILURES=0
 MAX_CONSECUTIVE_FAILURES=5
 BACKOFF_BASE=30  # seconds
 
+# Stall detection state
+STALL_COUNT=0
+PREV_PASSED=0
+INITIAL_MODEL="$MODEL"
+read -r PREV_PASSED _ <<< "$(check_features_progress "$FEATURES_FILE")"
+
 while [[ $SESSION -le $MAX_SESSIONS ]]; do
     # Check progress before starting
     read -r passed total <<< "$(check_features_progress "$FEATURES_FILE")"
@@ -265,13 +412,43 @@ while [[ $SESSION -le $MAX_SESSIONS ]]; do
         log_header "ALL FEATURES PASSING!"
         log_success "All $total features are passing after $((SESSION - 1)) coding sessions."
         echo "completed" >> "$HARNESS_LOG"
+        notify_user "Harness: Project Complete!" \
+            "All $total features passing after $((SESSION - 1)) sessions." \
+            "normal"
         break
     fi
 
     remaining=$(( total - passed ))
+    target_id=$(get_target_feature_id "$FEATURES_FILE")
+    target_pri=$(get_target_feature_priority "$FEATURES_FILE")
+
     log_header "Coding Session $SESSION / $MAX_SESSIONS"
     echo "Progress: $(progress_bar "$passed" "$total")  ($remaining remaining)"
+    echo "Target:   $target_id (priority $target_pri)"
+    echo "Model:    $MODEL"
     echo ""
+
+    # ── Skip feature if too many attempts ──
+    PROGRESS_FILE="$PROJECT_DIR/claude-progress.txt"
+    attempts=$(count_feature_attempts "$PROGRESS_FILE" "$target_id")
+    if [[ "$attempts" -ge "$SKIP_AFTER_ATTEMPTS" ]]; then
+        log_warn "$target_id has $attempts failed attempts (threshold: $SKIP_AFTER_ATTEMPTS)"
+        skip_feature "$FEATURES_FILE" "$target_id"
+        echo "--- Session $SESSION [$(date -u '+%Y-%m-%dT%H:%M:%SZ')] --- SKIPPED $target_id after $attempts attempts" >> "$HARNESS_LOG"
+        SESSION=$(( SESSION + 1 ))
+        continue
+    fi
+
+    # ── Dynamic timeout based on feature priority ──
+    if [[ "$SESSION" -eq 1 ]]; then
+        export SESSION_TIMEOUT=3600  # 1 hour for first coding session (may need env setup)
+        export IDLE_TIMEOUT=300      # 5 min idle
+        log_info "Session 1: extended timeout (1h)"
+    else
+        export SESSION_TIMEOUT=$(compute_session_timeout "$target_pri")
+        export IDLE_TIMEOUT=300  # 5 min idle → kill stuck sessions faster
+        log_info "Timeout: ${SESSION_TIMEOUT}s (priority $target_pri)"
+    fi
 
     # Render the coding prompt
     CODING_PROMPT_FILE=$(mktemp)
@@ -279,17 +456,9 @@ while [[ $SESSION -le $MAX_SESSIONS ]]; do
 
     SESSION_START=$(date +%s)
 
-    # First session gets extended timeout (5 hours) for initial setup/compilation
-    if [[ "$SESSION" -eq 1 ]]; then
-        export SESSION_TIMEOUT=18000  # 5 hours
-        export IDLE_TIMEOUT=18000     # 5 hours
-        log_info "Session 1: extended timeout (5h)"
-    else
-        unset SESSION_TIMEOUT IDLE_TIMEOUT  # fall back to defaults in utils.sh
-    fi
-
+    log_info "Effort: $REASONING_EFFORT"
     session_exit=0
-    run_claude_session "$CODING_PROMPT_FILE" "$PROJECT_DIR" "$MODEL" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} || session_exit=$?
+    run_claude_session "$CODING_PROMPT_FILE" "$PROJECT_DIR" "$MODEL" --effort "$REASONING_EFFORT" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} || session_exit=$?
     rm -f "$CODING_PROMPT_FILE"
 
     SESSION_END=$(date +%s)
@@ -317,11 +486,42 @@ while [[ $SESSION -le $MAX_SESSIONS ]]; do
             log_error "$MAX_CONSECUTIVE_FAILURES consecutive failures. Stopping to avoid wasting sessions."
             log_error "Check API rate limits or errors, then resume with --skip-init."
             log_session "$HARNESS_LOG" "$SESSION" "$passed" "$total" "$SESSION_DURATION" "$session_exit"
+            notify_user "Harness: Stopped" \
+                "$MAX_CONSECUTIVE_FAILURES consecutive failures. $passed/$total done. Check terminal." \
+                "critical"
             break
         fi
     else
         CONSECUTIVE_FAILURES=0
     fi
+
+    # ── Stall Detection & Auto-Escalation ──
+    if [[ "$passed" -le "$PREV_PASSED" ]]; then
+        STALL_COUNT=$(( STALL_COUNT + 1 ))
+        log_warn "No progress: stall count $STALL_COUNT/$STALL_THRESHOLD (stuck on $target_id)"
+
+        if [[ $STALL_COUNT -ge $STALL_THRESHOLD ]]; then
+            if [[ "$MODEL" != "$ESCALATION_MODEL" ]]; then
+                log_warn "Stalled for $STALL_COUNT sessions. Escalating: $MODEL → $ESCALATION_MODEL, effort: medium → high"
+                MODEL="$ESCALATION_MODEL"
+                REASONING_EFFORT="high"
+                echo "--- Escalated to $MODEL (effort: high) after $STALL_COUNT stalled sessions on $target_id ---" >> "$HARNESS_LOG"
+                STALL_COUNT=0
+            else
+                log_warn "Already on $ESCALATION_MODEL and still stalled. Will skip $target_id after $SKIP_AFTER_ATTEMPTS total attempts."
+            fi
+        fi
+    else
+        # Progress made — reset stall counter; downgrade model if we escalated and feature cleared
+        if [[ "$MODEL" != "$INITIAL_MODEL" && $STALL_COUNT -eq 0 ]]; then
+            log_info "Progress resumed. Downgrading: $MODEL → $INITIAL_MODEL, effort: high → medium"
+            MODEL="$INITIAL_MODEL"
+            REASONING_EFFORT="medium"
+            echo "--- Downgraded to $MODEL (effort: medium) after progress resumed ---" >> "$HARNESS_LOG"
+        fi
+        STALL_COUNT=0
+    fi
+    PREV_PASSED=$passed
 
     log_info "Session $SESSION complete in ${SESSION_DURATION}s. Features: $passed/$total $(progress_bar "$passed" "$total")"
     log_session "$HARNESS_LOG" "$SESSION" "$passed" "$total" "$SESSION_DURATION" "$session_exit"
@@ -336,6 +536,15 @@ read -r passed total <<< "$(check_features_progress "$FEATURES_FILE")"
 log_header "Final Summary"
 echo "Features passing: $passed / $total  $(progress_bar "$passed" "$total")"
 echo "Sessions used:    $((SESSION - 1))"
+echo "Final model:      $MODEL (started as $INITIAL_MODEL)"
+escalation_count=$(grep -c "^--- Escalated" "$HARNESS_LOG" 2>/dev/null || echo 0)
+skip_count=$(grep -c "SKIPPED" "$HARNESS_LOG" 2>/dev/null || echo 0)
+if [[ "$escalation_count" -gt 0 ]]; then
+    echo "Escalations:      $escalation_count"
+fi
+if [[ "$skip_count" -gt 0 ]]; then
+    echo "Features skipped: $skip_count"
+fi
 echo "Harness log:      $HARNESS_LOG"
 echo "Project dir:      $PROJECT_DIR"
 

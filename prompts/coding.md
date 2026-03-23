@@ -39,11 +39,15 @@ Parse the features. Identify:
 
 **This is the ONE feature you will implement in this session.**
 
+**IMPORTANT:** Check `claude-progress.txt` for any `FAILED` entries for this feature from previous sessions. If previous sessions documented what went wrong and suggested a different approach, **use that information** — do NOT repeat the same failed approach.
+
 ### Step 5: Start the Dev Environment
 ```bash
 bash init.sh
 ```
 Run the init script and confirm the project is ready for development.
+
+**WARNING:** If `init.sh` starts a background server or watcher, it will block your Bash tool forever. If you notice `init.sh` is hanging, kill it and fix the script — remove any background process that writes to stdout (e.g., `uvicorn --reload &`, `npm run dev &`). Only dependency installation and environment verification should be in `init.sh`.
 
 ### Step 6: Verify Baseline (Existing Tests Pass)
 Run the test suite before making any changes. If any previously-passing tests fail, **fix them first** before working on new features. Do NOT proceed with a broken baseline.
@@ -108,6 +112,26 @@ Confirm:
 
 Leave the codebase in a **clean, mergeable state**.
 
+## If You Cannot Complete the Feature
+
+If you run out of time or hit a blocker you cannot resolve, you MUST still update `claude-progress.txt` before the session ends. Append a **FAILED** entry:
+
+```
+### Session N — FAILED — [Feature ID]: [Short Description]
+- What was attempted
+- Where exactly it got stuck (specific error, file, line)
+- What approaches were tried and why they failed
+- Suggested different approach for the next session
+```
+
+Then commit whatever partial progress you have:
+```bash
+git add -A
+git commit -m "wip(FEAT-ID): partial progress — see claude-progress.txt for failure details"
+```
+
+**Do NOT leave the codebase in a broken state.** Revert any changes that break existing tests.
+
 ## Important Rules
 
 1. **ONE feature per session.** Do not try to implement multiple features.
@@ -117,3 +141,4 @@ Leave the codebase in a **clean, mergeable state**.
 5. **Leave the codebase clean.** Future sessions depend on a working baseline.
 6. **If something is fundamentally broken**, document it in `claude-progress.txt` and commit what you can. Don't leave a half-implemented mess.
 7. **If `init.sh` fails**, try to fix it before doing anything else. The dev environment must work.
+8. **Learn from previous failures.** If `claude-progress.txt` has FAILED entries for your target feature, read them carefully and try a different approach.
