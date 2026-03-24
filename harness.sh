@@ -139,6 +139,16 @@ if ! command -v jq &>/dev/null; then
     exit 1
 fi
 
+# Validate Claude CLI supports required flags
+if ! claude --help 2>&1 | grep -q -- "--effort"; then
+    log_error "Claude CLI does not support --effort flag. Update Claude CLI."
+    exit 1
+fi
+if ! claude --help 2>&1 | grep -q -- "--output-format"; then
+    log_error "Claude CLI does not support --output-format flag. Update Claude CLI."
+    exit 1
+fi
+
 # ─── Resolve Paths ──────────────────────────────────────────────────────────
 
 PROJECT_DIR="$(cd "$(dirname "$PROJECT_DIR")" 2>/dev/null && pwd)/$(basename "$PROJECT_DIR")" || {
@@ -285,6 +295,18 @@ if [[ "$SKIP_INIT" == false ]]; then
         exit 1
     fi
 
+    # Validate init.sh safety — block dangerous patterns before they waste hours
+    if [[ -f "$PROJECT_DIR/init.sh" ]]; then
+        if grep -qE '&\s*$' "$PROJECT_DIR/init.sh" && ! grep -qE '>/dev/null.*&|&>/dev/null' "$PROJECT_DIR/init.sh"; then
+            log_error "init.sh contains background processes without output redirection."
+            log_error "This WILL block Claude's Bash tool. Fix: remove '&' or add '> /dev/null 2>&1 &'"
+            notify_user "Harness: Dangerous init.sh" \
+                "init.sh has background processes that will hang. Fix before continuing." \
+                "critical"
+            exit 1
+        fi
+    fi
+
     # Validate that artifacts were created
     if ! validate_artifacts "$PROJECT_DIR"; then
         log_error "Initializer session completed but artifacts are missing."
@@ -389,6 +411,20 @@ count_feature_attempts() {
     echo "$count"
 }
 
+# ─── Pre-flight Safety Check ──────────────────────────────────────────────
+
+if [[ -f "$SCRIPT_DIR/lib/preflight.sh" ]]; then
+    log_info "Running pre-flight checks..."
+    if ! bash "$SCRIPT_DIR/lib/preflight.sh" "$PROJECT_DIR"; then
+        log_error "Pre-flight check failed. Fix issues above before continuing."
+        notify_user "Harness: Pre-flight Failed" \
+            "Safety issues found in project. Check terminal." \
+            "critical"
+        exit 1
+    fi
+    log_success "Pre-flight checks passed."
+fi
+
 # ─── Phase 2: Coding Loop ──────────────────────────────────────────────────
 
 log_header "Phase 2: Coding Sessions"
@@ -439,12 +475,18 @@ while [[ $SESSION -le $MAX_SESSIONS ]]; do
         continue
     fi
 
-    # ── Dynamic timeout based on feature priority ──
+    # ── Dynamic timeout and model based on session ──
     if [[ "$SESSION" -eq 1 ]]; then
-        export SESSION_TIMEOUT=3600  # 1 hour for first coding session (may need env setup)
-        export IDLE_TIMEOUT=300      # 5 min idle
-        log_info "Session 1: extended timeout (1h)"
+        # First coding session uses strongest model — it sets up the foundation
+        # (package refactors, core models) that all subsequent sessions depend on.
+        SESSION_MODEL="$ESCALATION_MODEL"
+        SESSION_EFFORT="high"
+        export SESSION_TIMEOUT=3600  # 1 hour for first coding session
+        export IDLE_TIMEOUT=600      # 10 min idle (complex setup)
+        log_info "Session 1: $SESSION_MODEL, effort $SESSION_EFFORT, timeout 1h"
     else
+        SESSION_MODEL="$MODEL"
+        SESSION_EFFORT="$REASONING_EFFORT"
         export SESSION_TIMEOUT=$(compute_session_timeout "$target_pri")
         export IDLE_TIMEOUT=300  # 5 min idle → kill stuck sessions faster
         log_info "Timeout: ${SESSION_TIMEOUT}s (priority $target_pri)"
@@ -456,9 +498,9 @@ while [[ $SESSION -le $MAX_SESSIONS ]]; do
 
     SESSION_START=$(date +%s)
 
-    log_info "Effort: $REASONING_EFFORT"
+    log_info "Model: $SESSION_MODEL, Effort: $SESSION_EFFORT"
     session_exit=0
-    run_claude_session "$CODING_PROMPT_FILE" "$PROJECT_DIR" "$MODEL" --effort "$REASONING_EFFORT" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} || session_exit=$?
+    run_claude_session "$CODING_PROMPT_FILE" "$PROJECT_DIR" "$SESSION_MODEL" --effort "$SESSION_EFFORT" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} || session_exit=$?
     rm -f "$CODING_PROMPT_FILE"
 
     SESSION_END=$(date +%s)
