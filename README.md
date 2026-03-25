@@ -72,6 +72,52 @@ Goal (natural language) → Phase 1: Initializer → Phase 2: Coding Loop → Co
 
 ## Usage
 
+### Option A: `/lrap` Skill (Interactive — Single-Session Agent Prompt)
+
+**Step 1** — In your current Claude Code session, run the `/lrap` command with a description of what you want done:
+
+```
+/lrap Migrate the database layer from SQLite to PostgreSQL with zero-downtime migration
+```
+
+The system will analyze your project and generate a self-contained agent prompt file, e.g. `AGENT_PROMPT_v1.0.0.md`.
+
+**Step 2** — Open a **new** Claude Code terminal window (remember: use the strongest model + highest effort — see warning above).
+
+**Step 3** — Drag the generated `AGENT_PROMPT_v1.0.0.md` file into the new terminal as your first input.
+
+**Step 4** — Claude Code will read the file and ask:
+
+```
+Want me to execute this prompt?
+```
+
+**⚠️ You MUST reply in English:** `Yes, please!`
+
+Then it starts working autonomously through all phases.
+
+> **为什么必须用英文回答？** Claude Code 的 agent 执行模式对英文指令的响应最稳定。用中文回答（如"好的"、"执行"）偶尔会被误解为新的对话输入而非执行确认，导致 agent 偏离预定计划。`Yes, please!` 是经过验证的最可靠触发词。
+
+**Step 1** — 在当前 Claude Code 会话中，运行 `/lrap` 命令并描述你要完成的工作：
+
+```
+/lrap 将数据库层从 SQLite 迁移到 PostgreSQL，要求零停机迁移
+```
+
+系统会分析项目并生成一个独立的 agent prompt 文件，如 `AGENT_PROMPT_v1.0.0.md`。
+
+**Step 2** — 打开一个**新的** Claude Code 终端窗口（切记：使用最强模型 + 最高推理强度）。
+
+**Step 3** — 将生成的 `AGENT_PROMPT_v1.0.0.md` 文件拖入新终端作为第一行输入。
+
+**Step 4** — Claude Code 读完文件后会问 `Want me to execute this prompt?`，**务必用英文回答：** `Yes, please!`
+
+然后它就会自动开始按阶段执行了。
+
+---
+
+### Option B: `harness.sh` (Fully Automated — Multi-Session Loop)
+
 ```bash
 # Full run (Phase 1 + Phase 2)
 ./harness.sh -d /path/to/project -M sonnet -m 50 "Your project goal description"
