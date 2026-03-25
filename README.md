@@ -10,6 +10,14 @@ An automated orchestration system based on **Eval-Driven Development (EDD)** tha
 
 一套基于 **Eval-Driven Development (EDD)** 理念的自动化编排系统，通过循环调用 Claude CLI，将自然语言项目目标逐步转化为可运行、经过测试的完整代码库——每次只实现一个功能。
 
+> **⚠️ Important: Use the strongest model and highest effort level available.**
+>
+> When launching a new Claude Code window for agent execution, always select the most capable model at its highest setting. For example, as of March 2026, running with the default mode (e.g. Sonnet 4.6, medium effort) frequently causes sessions to stall — a small task can take 1-2 days. Switching to **Opus 4.6 (1M context) with high effort** completes the same work dramatically faster. Yes, it costs more. Consider which matters more to you: your time or your tokens.
+>
+> **⚠️ 重要提示：请使用你能调用的最强模型和最高推理强度。**
+>
+> 在新开 Claude Code 窗口执行 agent 任务时，务必选择最强模型的最高档位。以 2026 年 3 月为例，使用默认模式（如 Sonnet 4.6 中等推理强度）经常卡死——一个小任务可能跑一两天。而切换到 **Opus 4.6 (1M context) + High Effort** 则能以极快速度完成。当然，费用更高。请自行权衡：时间和金钱，哪个对你更重要。
+
 ## Theoretical Foundations
 
 This system synthesizes three lines of research:
