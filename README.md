@@ -90,7 +90,7 @@ While the harness runs multi-session loops for greenfield projects, the `/lrap` 
 cp -r skills/lrap ~/.claude/skills/lrap
 
 # Then in any Claude Code session:
-/lrap Overhaul all mock exams to match official exam format
+/lrap Migrate the auth system from JWT to OAuth2 with backward compatibility
 ```
 
 See [`skills/lrap/README.md`](skills/lrap/README.md) for details.

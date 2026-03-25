@@ -35,9 +35,9 @@ Then restart Claude Code. The `/lrap` command becomes available in any project.
 ## Usage
 
 ```
-/lrap Overhaul all 3 mock exams to match official exam format and content distribution
 /lrap Migrate the auth system from JWT to OAuth2 with backward compatibility
 /lrap Add internationalization support for Japanese and Korean
+/lrap Refactor the monolithic API into 5 microservices with shared database migration
 ```
 
 ## Output
@@ -63,4 +63,4 @@ The generated prompts follow these principles (learned from production use):
 
 ## Origin
 
-Developed during the AIGP exam prep project where manually-written agent prompts (v7.3.0, v8.0.0) orchestrated multi-hour autonomous sessions covering flashcard generation, VectorDB rebuilds, mock exam overhauls, and audit infrastructure deployment.
+Developed from production experience where manually-written agent prompts orchestrated multi-hour autonomous sessions covering data pipeline rebuilds, content overhauls, and infrastructure deployment across 10+ sequential versions.
