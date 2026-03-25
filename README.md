@@ -81,6 +81,25 @@ The OpenClack project (Electron desktop app): 90 features, ~24 automated session
 
 OpenClack 项目（Electron 桌面应用）：90 个 feature，约 24 个自动 session，全部通过，生成 40+ 次 Git 提交，含完整测试套件和 CI/CD 流水线。
 
+## Companion: `/lrap` Skill — Single-Session Agent Prompt Generator
+
+While the harness runs multi-session loops for greenfield projects, the `/lrap` Claude Code skill generates **single-session prompts** for planned upgrades to existing codebases.
+
+```bash
+# Install the skill
+cp -r skills/lrap ~/.claude/skills/lrap
+
+# Then in any Claude Code session:
+/lrap Overhaul all mock exams to match official exam format
+```
+
+See [`skills/lrap/README.md`](skills/lrap/README.md) for details.
+
+| Tool | Sessions | Use Case |
+|------|----------|----------|
+| `harness.sh` | Many × 1 feature | Greenfield projects (20-200 features) |
+| `/lrap` | 1 × many phases | Planned upgrades (3-8 sequential phases) |
+
 ## License
 
 MIT
