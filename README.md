@@ -140,10 +140,11 @@ OpenClack 项目（Electron 桌面应用）：90 个 feature，约 24 个自动 
 While the harness runs multi-session loops for greenfield projects, the `/lrap` Claude Code skill generates **single-session prompts** for planned upgrades to existing codebases.
 
 ```bash
-# Install the skill
-cp -r skills/lrap ~/.claude/skills/lrap
+# Install the command
+mkdir -p ~/.claude/commands
+cp skills/lrap/commands/lrap.md ~/.claude/commands/lrap.md
 
-# Then in any Claude Code session:
+# Then restart Claude Code and in any session:
 /lrap Migrate the auth system from JWT to OAuth2 with backward compatibility
 ```
 

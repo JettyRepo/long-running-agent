@@ -1,6 +1,6 @@
 ---
 description: Generate a long-running agent prompt for a given requirement
-user-invocable: true
+argument-hint: Requirement description
 ---
 
 ## Context

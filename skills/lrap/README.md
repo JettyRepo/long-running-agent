@@ -24,13 +24,16 @@ harness.sh  → Many sessions × 1 feature each  → Greenfield projects (20-200
 
 ## Installation
 
-Copy `skills/lrap/` to your Claude Code skills directory:
+Copy the command file to your Claude Code custom commands directory:
 
 ```bash
-cp -r skills/lrap ~/.claude/skills/lrap
+mkdir -p ~/.claude/commands
+cp skills/lrap/commands/lrap.md ~/.claude/commands/lrap.md
 ```
 
 Then restart Claude Code. The `/lrap` command becomes available in any project.
+
+> **Note**: `~/.claude/commands/` is for user-defined slash commands. Do NOT copy to `~/.claude/skills/` — that directory is reserved for marketplace-installed plugins and requires formal plugin registration.
 
 ## Usage
 
