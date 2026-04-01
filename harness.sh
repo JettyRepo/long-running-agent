@@ -511,22 +511,38 @@ while [[ $SESSION -le $MAX_SESSIONS ]]; do
 
     if [[ $session_exit -ne 0 ]]; then
         log_warn "Session $SESSION exited with code $session_exit (duration: ${SESSION_DURATION}s)"
+
+        # ── Rate limit detection: parse output, auto-wait, resume ──
+        LAST_OUTPUT="$PROJECT_DIR/.harness-last-output.txt"
+        if detect_rate_limit "$LAST_OUTPUT" "$PROJECT_DIR"; then
+            rl_wait=$(jq -r '.wait_seconds' "$PROJECT_DIR/.harness-ratelimit.json" 2>/dev/null || echo 360)
+            rl_source=$(jq -r '.parse_source' "$PROJECT_DIR/.harness-ratelimit.json" 2>/dev/null || echo "unknown")
+            echo "--- Session $SESSION [$(date -u '+%Y-%m-%dT%H:%M:%SZ')] --- RATE LIMITED (${rl_source}) — auto-waiting ${rl_wait}s" >> "$HARNESS_LOG"
+            log_session "$HARNESS_LOG" "$SESSION" "$passed" "$total" "$SESSION_DURATION" "$session_exit"
+            rate_limit_wait "$rl_wait" "$PROJECT_DIR"
+            # Rate limits are recoverable — don't count as consecutive failure
+            CONSECUTIVE_FAILURES=0
+            # Retry same session number (don't increment)
+            continue
+        fi
+
+        # ── Non-rate-limit failure ──
         CONSECUTIVE_FAILURES=$(( CONSECUTIVE_FAILURES + 1 ))
 
-        # If session failed very quickly (<10s), it's likely a rate limit or API error
+        # Fast failure (<10s) — likely transient API error, backoff
         if [[ $SESSION_DURATION -lt 10 ]]; then
             wait_time=$(( BACKOFF_BASE * CONSECUTIVE_FAILURES ))
             if [[ $wait_time -gt 300 ]]; then
                 wait_time=300  # cap at 5 minutes
             fi
-            log_warn "Session failed in <10s — likely rate limited. Waiting ${wait_time}s before retry..."
+            log_warn "Session failed in <10s — transient error. Waiting ${wait_time}s before retry..."
             sleep "$wait_time"
         fi
 
-        # Bail out after too many consecutive failures
+        # Bail out after too many consecutive non-rate-limit failures
         if [[ $CONSECUTIVE_FAILURES -ge $MAX_CONSECUTIVE_FAILURES ]]; then
             log_error "$MAX_CONSECUTIVE_FAILURES consecutive failures. Stopping to avoid wasting sessions."
-            log_error "Check API rate limits or errors, then resume with --skip-init."
+            log_error "Check API errors, then resume with --skip-init."
             log_session "$HARNESS_LOG" "$SESSION" "$passed" "$total" "$SESSION_DURATION" "$session_exit"
             notify_user "Harness: Stopped" \
                 "$MAX_CONSECUTIVE_FAILURES consecutive failures. $passed/$total done. Check terminal." \

@@ -117,6 +117,28 @@ detect_state() {
         return
     fi
 
+    # Check for rate limit auto-wait
+    local rl_file="$PROJECT_DIR/.harness-ratelimit.json"
+    if [[ -f "$rl_file" ]]; then
+        local rl_waiting
+        rl_waiting=$(jq -r '.waiting // false' "$rl_file" 2>/dev/null || echo false)
+        if [[ "$rl_waiting" == "true" ]]; then
+            local rl_resume rl_remaining rl_resume_ts
+            rl_resume=$(jq -r '.resume_at // "unknown"' "$rl_file" 2>/dev/null || echo "unknown")
+            rl_resume_ts=$(jq -r '.resume_ts // 0' "$rl_file" 2>/dev/null || echo 0)
+            local now_ts
+            now_ts=$(date +%s)
+            if [[ "$rl_resume_ts" -gt 0 ]] 2>/dev/null; then
+                rl_remaining=$(( rl_resume_ts - now_ts ))
+                if (( rl_remaining < 0 )); then rl_remaining=0; fi
+            else
+                rl_remaining=$(jq -r '.remaining // "?"' "$rl_file" 2>/dev/null || echo "?")
+            fi
+            echo "⏸️ " "RATE LIMITED" "auto-waiting — resume ~${rl_resume} (${rl_remaining}s)"
+            return
+        fi
+    fi
+
     claude_pid=""
     claude_pid=$(pgrep -f "claude.*-p.*" 2>/dev/null | head -1 || true)
     claude_alive=false
@@ -201,7 +223,7 @@ while true; do
         BETWEEN*|SESSION*)
                       echo -e "  ${Y}${state_icon}${NC} ${BOLD}${state_label}${NC}  ${DIM}${state_detail}${NC}  ${DIM}│${NC} ${PHASE}" ;;
         "RATE LIMITED")
-                      echo -e "  ${Y}${state_icon}${NC} ${BOLD}${state_label}${NC}  ${Y}${state_detail}${NC}  ${DIM}│${NC} ${PHASE}" ;;
+                      echo -e "  ${BG_Y}${W} ${state_icon} ${state_label} ${NC}  ${Y}${state_detail}${NC}  ${DIM}│${NC} ${PHASE}" ;;
         "LONG WAIT")  echo -e "  ${Y}${state_icon}${NC} ${BOLD}${state_label}${NC}  ${Y}${state_detail}${NC}  ${DIM}│${NC} ${PHASE}" ;;
         "LIKELY STUCK"|"NOT RUNNING"|STOPPED)
                       echo -e "  ${BG_R}${W} ${state_icon} ${state_label} ${NC}  ${R}${state_detail}${NC}" ;;

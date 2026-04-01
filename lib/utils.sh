@@ -448,6 +448,9 @@ run_claude_session() {
         sleep 0.3
     done
 
+    # Save output for rate limit detection (before cleanup removes tmpfile)
+    tail -200 "$output_tmpfile" > "$project_dir/.harness-last-output.txt" 2>/dev/null || true
+
     # Process remaining output after Claude exits
     local final_size
     final_size=$(wc -c < "$output_tmpfile")
@@ -503,7 +506,7 @@ run_claude_session() {
     else
         kill "$claude_pid" 2>/dev/null || true
     fi
-    wait "$claude_pid" 2>/dev/null || true
+    wait "$claude_pid" 2>/dev/null && exit_code=0 || exit_code=$?
     rm -f "$output_tmpfile" "$activity_file"
 
     # Remove the EXIT trap so it doesn't fire again
@@ -533,6 +536,196 @@ validate_artifacts() {
     fi
 
     return $missing
+}
+
+# ─── Rate Limit Detection & Auto-Wait ────────────────────────────────────
+
+# Detect rate limit from Claude session output
+# Usage: detect_rate_limit <output_file> <project_dir>
+# Returns 0 if rate limit detected (writes .harness-ratelimit.json), 1 otherwise
+detect_rate_limit() {
+    local output_file="$1"
+    local project_dir="$2"
+    local rl_file="$project_dir/.harness-ratelimit.json"
+
+    rm -f "$rl_file"
+
+    if [[ ! -f "$output_file" || ! -s "$output_file" ]]; then
+        return 1
+    fi
+
+    # Search for rate limit indicators in the output
+    local rl_content=""
+    rl_content=$(grep -iE 'rate.limit|rate_limit|429|quota.*exceed|overloaded|too many requests|capacity|try again|usage.limit|billing|credit|throttl' "$output_file" 2>/dev/null | tail -10 || true)
+
+    if [[ -z "$rl_content" ]]; then
+        return 1
+    fi
+
+    local now_ts
+    now_ts=$(date +%s)
+    local wait_seconds=0
+    local parse_source="none"
+
+    # Pattern 1: "retry-after: N" or "retry after N" (seconds)
+    local retry_secs
+    retry_secs=$(echo "$rl_content" | grep -oiE 'retry[- _]?after[: ]+([0-9]+)' | grep -oE '[0-9]+' | head -1 || true)
+    if [[ -n "$retry_secs" ]] && (( retry_secs > 0 )); then
+        wait_seconds=$(( retry_secs + 60 ))
+        parse_source="retry-after"
+    fi
+
+    # Pattern 2: ISO 8601 timestamp (e.g., 2026-03-31T12:30:00Z)
+    if [[ $wait_seconds -eq 0 ]]; then
+        local iso_time
+        iso_time=$(echo "$rl_content" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[Z]?' | head -1 || true)
+        if [[ -n "$iso_time" ]]; then
+            local clean_time="${iso_time%Z}"
+            local target_ts=0
+            # macOS date
+            target_ts=$(date -j -f '%Y-%m-%dT%H:%M:%S' "$clean_time" +%s 2>/dev/null || true)
+            # Linux date fallback
+            if [[ -z "$target_ts" || "$target_ts" == "0" ]]; then
+                target_ts=$(date -d "$iso_time" +%s 2>/dev/null || echo 0)
+            fi
+            if (( target_ts > now_ts )); then
+                wait_seconds=$(( target_ts - now_ts + 60 ))
+                parse_source="ISO-timestamp"
+            fi
+        fi
+    fi
+
+    # Pattern 3: "in N minutes" / "N minute(s)"
+    if [[ $wait_seconds -eq 0 ]]; then
+        local mins
+        mins=$(echo "$rl_content" | grep -oiE '([0-9]+)\s*minute' | grep -oE '[0-9]+' | head -1 || true)
+        if [[ -n "$mins" ]] && (( mins > 0 )); then
+            wait_seconds=$(( mins * 60 + 60 ))
+            parse_source="minutes-ref"
+        fi
+    fi
+
+    # Pattern 4: "N seconds" (standalone)
+    if [[ $wait_seconds -eq 0 ]]; then
+        local secs
+        secs=$(echo "$rl_content" | grep -oiE '([0-9]+)\s*second' | grep -oE '[0-9]+' | head -1 || true)
+        if [[ -n "$secs" ]] && (( secs > 10 )); then
+            wait_seconds=$(( secs + 60 ))
+            parse_source="seconds-ref"
+        fi
+    fi
+
+    # Pattern 5: "at HH:MM" or "until HH:MM:SS" time reference
+    if [[ $wait_seconds -eq 0 ]]; then
+        local time_ref
+        time_ref=$(echo "$rl_content" | grep -oE '(at |until )[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?' | grep -oE '[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?' | head -1 || true)
+        if [[ -n "$time_ref" ]]; then
+            local target_ts=0
+            if [[ "$time_ref" == *:*:* ]]; then
+                target_ts=$(date -j -f '%H:%M:%S' "$time_ref" +%s 2>/dev/null || echo 0)
+            else
+                target_ts=$(date -j -f '%H:%M' "$time_ref" +%s 2>/dev/null || echo 0)
+            fi
+            if (( target_ts > now_ts )); then
+                wait_seconds=$(( target_ts - now_ts + 60 ))
+                parse_source="time-of-day"
+            fi
+        fi
+    fi
+
+    # Fallback: rate limit detected but can't parse specific time
+    if [[ $wait_seconds -eq 0 ]]; then
+        wait_seconds=360  # 6 min (typical 5 min reset + 1 min buffer)
+        parse_source="fallback"
+    fi
+
+    # Safety cap: max 30 minutes to avoid absurd waits from parse errors
+    if (( wait_seconds > 1800 )); then
+        wait_seconds=1800
+    fi
+
+    local resume_ts=$(( now_ts + wait_seconds ))
+    local resume_at
+    resume_at=$(date -r "$resume_ts" '+%H:%M:%S' 2>/dev/null \
+             || date -d "@$resume_ts" '+%H:%M:%S' 2>/dev/null \
+             || echo "unknown")
+
+    jq -n \
+        --arg detected_at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+        --arg resume_at "$resume_at" \
+        --argjson wait_seconds "$wait_seconds" \
+        --argjson resume_ts "$resume_ts" \
+        --arg parse_source "$parse_source" \
+        --arg raw_message "${rl_content:0:500}" \
+        '{rate_limited:true, detected_at:$detected_at, resume_at:$resume_at,
+          wait_seconds:$wait_seconds, resume_ts:$resume_ts,
+          parse_source:$parse_source, raw_message:$raw_message}' \
+        > "$rl_file"
+
+    log_info "Rate limit detected (source: $parse_source, wait: ${wait_seconds}s, resume: ~$resume_at)"
+    return 0
+}
+
+# Wait for rate limit to expire with countdown display
+# Usage: rate_limit_wait <wait_seconds> <project_dir>
+rate_limit_wait() {
+    local wait_seconds="$1"
+    local project_dir="$2"
+
+    local resume_ts=$(( $(date +%s) + wait_seconds ))
+    local resume_time
+    resume_time=$(date -r "$resume_ts" '+%H:%M:%S' 2>/dev/null \
+               || date -d "@$resume_ts" '+%H:%M:%S' 2>/dev/null \
+               || echo "unknown")
+
+    log_warn "Rate limited — auto-waiting ${wait_seconds}s (resume ~$resume_time)"
+    notify_user "Harness: Rate Limited" \
+        "Auto-waiting ${wait_seconds}s. Resume at ~$resume_time." \
+        "normal"
+
+    # Write state for monitor
+    local rl_file="$project_dir/.harness-ratelimit.json"
+    jq -n \
+        --argjson resume_ts "$resume_ts" \
+        --argjson wait_seconds "$wait_seconds" \
+        --arg resume_at "$resume_time" \
+        '{waiting:true, resume_ts:$resume_ts, wait_seconds:$wait_seconds, resume_at:$resume_at}' \
+        > "$rl_file" 2>/dev/null || true
+
+    # Countdown loop
+    local remaining=$wait_seconds
+    while (( remaining > 0 )); do
+        printf "\r${YELLOW}[RATE LIMIT]${NC} Resuming in %02dm %02ds (at ~%s)  " \
+            $(( remaining / 60 )) $(( remaining % 60 )) "$resume_time"
+
+        # Update state file for monitor every 30s
+        if (( remaining % 30 == 0 )); then
+            jq -n \
+                --argjson resume_ts "$resume_ts" \
+                --argjson remaining "$remaining" \
+                --arg resume_at "$resume_time" \
+                '{waiting:true, resume_ts:$resume_ts, remaining:$remaining, resume_at:$resume_at}' \
+                > "$rl_file" 2>/dev/null || true
+        fi
+
+        if (( remaining > 60 )); then
+            sleep 30
+            remaining=$(( remaining - 30 ))
+        elif (( remaining > 10 )); then
+            sleep 10
+            remaining=$(( remaining - 10 ))
+        else
+            sleep 1
+            remaining=$(( remaining - 1 ))
+        fi
+    done
+    printf "\r${GREEN}[RATE LIMIT]${NC} Wait complete — resuming session.                                 \n"
+
+    rm -f "$rl_file"
+
+    notify_user "Harness: Resuming" \
+        "Rate limit expired. Resuming coding session." \
+        "normal"
 }
 
 # Get a human-readable progress bar
