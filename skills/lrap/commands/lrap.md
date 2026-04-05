@@ -6,12 +6,15 @@ argument-hint: Requirement description
 ## Context
 
 - Project directory: !`pwd`
-- Current branch: !`git branch --show-current`
-- Recent commits: !`git log --oneline -5`
+- Git status: !`git rev-parse --is-inside-work-tree 2>/dev/null && echo "repo detected" || echo "No git repository found; proceeding without git history."`
+- Current branch: !`git branch --show-current 2>/dev/null || echo 'N/A (not a git repo)'`
+- Recent commits: !`git log --oneline -5 2>/dev/null || echo 'N/A (not a git repo)'`
 - Current version (if applicable): !`grep -r 'Current version' CLAUDE.md 2>/dev/null | head -1 || echo 'N/A'`
 - Project rules: !`head -30 CLAUDE.md 2>/dev/null || echo 'No CLAUDE.md'`
 
 ## Your task
+
+Git history and branch info above are **enhancing context, not prerequisites**. If unavailable, generate the implementation roadmap based on directory contents, user requirements, and existing documentation. When git is not available, skip Phase 0 (worktree isolation) and work directly in the project directory.
 
 The user wants to plan the following requirement as a **self-contained long-running agent prompt** — a Markdown document that can be pasted into a fresh Claude Code session for autonomous execution.
 
