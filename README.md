@@ -120,10 +120,10 @@ Then it starts working autonomously through all phases.
 
 ```bash
 # Full run (Phase 1 + Phase 2)
-./harness.sh -d /path/to/project -M sonnet -m 50 "Your project goal description"
+./harness.sh -d /path/to/project -m 50 "Your project goal description"
 
 # Resume from checkpoint (skip Phase 1)
-./harness.sh --skip-init -d /path/to/project -M sonnet -m 50 "Your project goal"
+./harness.sh --skip-init -d /path/to/project -m 50 "Your project goal"
 
 # Monitor in a separate terminal
 ./monitor.sh /path/to/project

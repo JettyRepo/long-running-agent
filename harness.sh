@@ -13,8 +13,9 @@ source "$SCRIPT_DIR/lib/utils.sh"
 
 PROJECT_DIR="./project"
 MAX_SESSIONS=50
-MODEL="sonnet"
+MODEL="opus"
 ESCALATION_MODEL="opus"
+LITE_MODEL="sonnet"            # lighter model for trivial (priority 1) features
 MCP_CONFIG=""
 SKIP_INIT=false
 DRY_RUN=false
@@ -36,8 +37,9 @@ Orchestrates Claude across multiple sessions to build a project incrementally.
 Options:
   -d, --dir <path>        Working directory for the project (default: ./project)
   -m, --max-sessions <n>  Maximum number of coding sessions (default: 50)
-  -M, --model <model>     Claude model to use (default: sonnet)
+  -M, --model <model>     Claude model to use (default: opus)
   -E, --escalation-model  Model to escalate to on stall (default: opus)
+  -L, --lite-model <model> Lighter model for trivial features (default: sonnet)
   --stall-threshold <n>   Sessions with 0 progress before escalation (default: 3)
   --skip-after <n>        Skip feature after n failed attempts (default: 5)
   --mcp-config <path>     MCP config file to pass to Claude
@@ -49,7 +51,7 @@ Examples:
   $(basename "$0") "Build a REST API for a todo app with Node.js and Express"
   $(basename "$0") -d ./my-app -m 30 "Build a CLI markdown-to-HTML converter in Python"
   $(basename "$0") --skip-init -d ./my-app "Continue building the app"
-  $(basename "$0") -M sonnet -E opus --stall-threshold 3 "Build my project"
+  $(basename "$0") -M opus -L sonnet --stall-threshold 3 "Build my project"
 EOF
     exit 0
 }
@@ -72,6 +74,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -E|--escalation-model)
             ESCALATION_MODEL="$2"
+            shift 2
+            ;;
+        -L|--lite-model)
+            LITE_MODEL="$2"
             shift 2
             ;;
         --stall-threshold)
@@ -178,6 +184,7 @@ if [[ "$DRY_RUN" == true ]]; then
     echo "Project dir:       $PROJECT_DIR"
     echo "Max sessions:      $MAX_SESSIONS"
     echo "Model:             $MODEL"
+    echo "Lite model:        $LITE_MODEL"
     echo "Escalation model:  $ESCALATION_MODEL"
     echo "Stall threshold:   $STALL_THRESHOLD sessions"
     echo "Skip after:        $SKIP_AFTER_ATTEMPTS attempts"
@@ -231,7 +238,7 @@ fi
 # ─── Build Extra Args ──────────────────────────────────────────────────────
 
 EXTRA_ARGS=()
-REASONING_EFFORT="medium"   # default for normal coding sessions
+REASONING_EFFORT="high"   # default for opus — strongest reasoning
 if [[ -n "$MCP_CONFIG" ]]; then
     EXTRA_ARGS+=(--mcp-config "$MCP_CONFIG")
 fi
@@ -475,20 +482,28 @@ while [[ $SESSION -le $MAX_SESSIONS ]]; do
         continue
     fi
 
-    # ── Dynamic timeout and model based on session ──
-    if [[ "$SESSION" -eq 1 ]]; then
-        # First coding session uses strongest model — it sets up the foundation
-        # (package refactors, core models) that all subsequent sessions depend on.
+    # ── Dynamic timeout and model based on session + feature complexity ──
+    if [[ "$SESSION" -le 2 ]]; then
+        # First 2 coding sessions use strongest model — they set up the foundation
+        # (package refactors, core models, critical infra) that everything depends on.
         SESSION_MODEL="$ESCALATION_MODEL"
         SESSION_EFFORT="high"
-        export SESSION_TIMEOUT=3600  # 1 hour for first coding session
+        export SESSION_TIMEOUT=3600  # 1 hour for foundation sessions
         export IDLE_TIMEOUT=600      # 10 min idle (complex setup)
-        log_info "Session 1: $SESSION_MODEL, effort $SESSION_EFFORT, timeout 1h"
+        log_info "Foundation session $SESSION: $SESSION_MODEL, effort $SESSION_EFFORT, timeout 1h"
+    elif [[ "$target_pri" -le 1 && "$STALL_COUNT" -eq 0 ]]; then
+        # Trivial features (priority 1) with no stall history — use lighter model
+        SESSION_MODEL="$LITE_MODEL"
+        SESSION_EFFORT="medium"
+        export SESSION_TIMEOUT=$(compute_session_timeout "$target_pri")
+        export IDLE_TIMEOUT=300
+        log_info "Trivial feature ($target_id): $SESSION_MODEL, effort $SESSION_EFFORT, timeout ${SESSION_TIMEOUT}s"
     else
+        # Default: full-strength opus for everything else
         SESSION_MODEL="$MODEL"
         SESSION_EFFORT="$REASONING_EFFORT"
         export SESSION_TIMEOUT=$(compute_session_timeout "$target_pri")
-        export IDLE_TIMEOUT=300  # 5 min idle → kill stuck sessions faster
+        export IDLE_TIMEOUT=300
         log_info "Timeout: ${SESSION_TIMEOUT}s (priority $target_pri)"
     fi
 
@@ -570,13 +585,9 @@ while [[ $SESSION -le $MAX_SESSIONS ]]; do
             fi
         fi
     else
-        # Progress made — reset stall counter; downgrade model if we escalated and feature cleared
-        if [[ "$MODEL" != "$INITIAL_MODEL" && $STALL_COUNT -eq 0 ]]; then
-            log_info "Progress resumed. Downgrading: $MODEL → $INITIAL_MODEL, effort: high → medium"
-            MODEL="$INITIAL_MODEL"
-            REASONING_EFFORT="medium"
-            echo "--- Downgraded to $MODEL (effort: medium) after progress resumed ---" >> "$HARNESS_LOG"
-        fi
+        # Progress made — reset stall counter
+        # NOTE: With opus as default, we no longer downgrade after progress resumes.
+        # The lite model is used selectively per-session for trivial features only.
         STALL_COUNT=0
     fi
     PREV_PASSED=$passed
