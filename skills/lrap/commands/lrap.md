@@ -14,7 +14,7 @@ argument-hint: Requirement description
 
 ## Your task
 
-Git history and branch info above are **enhancing context, not prerequisites**. If unavailable, generate the implementation roadmap based on directory contents, user requirements, and existing documentation. When git is not available, skip Phase 0 (worktree isolation) and work directly in the project directory.
+Git history and branch info above are **enhancing context, not prerequisites**. If unavailable, generate the implementation roadmap based on directory contents, user requirements, and existing documentation. When git is not available, skip Phase 0 (`EnterWorktree` isolation) and work directly in the project directory.
 
 The user wants to plan the following requirement as a **self-contained long-running agent prompt** — a Markdown document that can be pasted into a fresh Claude Code session for autonomous execution.
 
@@ -41,42 +41,47 @@ Generate a complete agent prompt as a Markdown file saved to the project root (e
 
 ### Phase 0 — Safe Fork (copy this template verbatim into every generated prompt)
 
+**Step 1 — Verify clean state:**
+
 ```bash
-# ── Phase 0: Safe Fork ──────────────────────────────────────────────────────
-# Creates an isolated worktree + branch. The original directory is NEVER touched.
-
-set -euo pipefail
-
-PROJECT_DIR=$(pwd)
-BASE_BRANCH=$(git branch --show-current)
-TASK_NAME="<TASK_SLUG>"          # ← replace with a short kebab-case task name
-TIMESTAMP=$(date +%Y%m%dT%H%M)
-BRANCH="lrap/${TASK_NAME}-${TIMESTAMP}"
-WORKTREE_DIR="${PROJECT_DIR}-lrap-${TASK_NAME}-${TIMESTAMP}"
-
-# 1. Ensure clean state
 if [ -n "$(git status --porcelain)" ]; then
     echo "ERROR: Working directory has uncommitted changes. Commit or stash first."
     exit 1
 fi
+```
 
-# 2. Create worktree with new branch
-git worktree add "$WORKTREE_DIR" -b "$BRANCH"
-cd "$WORKTREE_DIR"
+**Step 2 — Enter worktree** (use Claude Code's built-in `EnterWorktree` tool):
 
-echo "✓ Worktree created: $WORKTREE_DIR"
-echo "  Branch: $BRANCH (forked from $BASE_BRANCH at $(git rev-parse --short HEAD))"
-echo "  Original directory UNTOUCHED: $PROJECT_DIR"
+Call `EnterWorktree` with `name: "lrap/<TASK_SLUG>"`.
 
-# 3. Bootstrap environment in worktree (if applicable)
+This automatically:
+- Creates an isolated worktree in `.claude/worktrees/lrap/<TASK_SLUG>` with a new branch based on HEAD
+- Switches the session's working directory into the worktree
+- Manages cleanup on session exit (prompts to keep or remove)
+
+**Step 3 — Capture worktree metadata:**
+
+```bash
+BRANCH=$(git branch --show-current)
+WORKTREE_DIR=$(pwd)
+TASK_NAME="<TASK_SLUG>"
+echo "✓ Worktree active: $WORKTREE_DIR"
+echo "  Branch: $BRANCH (based on $(git rev-parse --short HEAD))"
+```
+
+**Step 4 — Bootstrap environment (if applicable):**
+
+```bash
 # e.g.: npm install, pip install -r requirements.txt, etc.
-# Include project-specific bootstrap commands here.
+```
 
-# 4. Verify baseline — run tests before any changes
+**Step 5 — Verify baseline — run tests before any changes:**
+
+```bash
 # e.g.: npm test, pytest, etc.
 ```
 
-**CRITICAL**: After Phase 0, ALL subsequent instructions must use `$WORKTREE_DIR` as the working directory. Every file path in the prompt must be relative to the worktree, not the original project directory. The agent must `cd "$WORKTREE_DIR"` at the start of every phase.
+**CRITICAL**: After Phase 0, `EnterWorktree` has already switched the session's working directory to the worktree. All subsequent phases work in this directory automatically — no explicit `cd` needed. File paths in the prompt must be relative, not absolute to the original project directory.
 
 ### Phase checkpoint (insert at the end of every Phase 1–N, after verification passes)
 
@@ -93,43 +98,50 @@ echo "✓ Checkpoint: lrap/${TASK_NAME}-phase-N"
 ```markdown
 ## After Completion
 
-All work is on branch `$BRANCH` in worktree `$WORKTREE_DIR`.
-The original directory `$PROJECT_DIR` is completely untouched.
+All work is on the worktree branch. The original directory is completely untouched.
+The agent session will prompt to keep or remove the worktree on exit — choose **keep** to review before merging.
+
+### Find worktree branch and path
+    git worktree list
+    # Worktree: .claude/worktrees/lrap/<TASK_NAME>
+    # Note the branch name from the output
 
 ### Accept all changes (merge into base branch)
-    cd <PROJECT_DIR>
-    git merge <BRANCH>
-    git worktree remove <WORKTREE_DIR>
+    BRANCH=$(git -C .claude/worktrees/lrap/<TASK_NAME> branch --show-current)
+    git merge "$BRANCH"
+    git worktree remove .claude/worktrees/lrap/<TASK_NAME>
+    git branch -D "$BRANCH"
     # optional: clean up tags
     git tag -d $(git tag -l 'lrap/<TASK_NAME>-*')
 
 ### Accept all changes as a single squashed commit
-    cd <PROJECT_DIR>
-    git merge --squash <BRANCH>
+    BRANCH=$(git -C .claude/worktrees/lrap/<TASK_NAME> branch --show-current)
+    git merge --squash "$BRANCH"
     git commit -m "feat: <description>"
-    git worktree remove <WORKTREE_DIR>
+    git worktree remove .claude/worktrees/lrap/<TASK_NAME>
+    git branch -D "$BRANCH"
 
 ### Roll back to a specific phase (e.g. keep Phase 1-2, discard Phase 3+)
-    cd <WORKTREE_DIR>
+    cd .claude/worktrees/lrap/<TASK_NAME>
     git reset --hard lrap/<TASK_NAME>-phase-2
     # Then continue working from Phase 2, or merge this state
 
 ### Discard everything (full rollback)
-    cd <PROJECT_DIR>
-    git worktree remove --force <WORKTREE_DIR>
+    git worktree remove --force .claude/worktrees/lrap/<TASK_NAME>
+    # Branch name from `git worktree list` above
     git branch -D <BRANCH>
     git tag -d $(git tag -l 'lrap/<TASK_NAME>-*')
 
 ### Inspect side-by-side
-    diff -rq <PROJECT_DIR> <WORKTREE_DIR> --exclude=node_modules --exclude=.git
+    diff -rq . .claude/worktrees/lrap/<TASK_NAME> --exclude=node_modules --exclude=.git
 ```
 
-Replace `<PROJECT_DIR>`, `<BRANCH>`, `<WORKTREE_DIR>`, and `<TASK_NAME>` with the actual values from Phase 0 when generating the prompt.
+Replace `<TASK_NAME>` and `<BRANCH>` with actual values. `<TASK_NAME>` is the slug from Phase 0. `<BRANCH>` is auto-generated by `EnterWorktree` — obtain it via `git worktree list`.
 
 ### Writing principles
 
 - **Self-contained**: The agent has never seen this project. Include all necessary context (file paths, schemas, field names, current values).
-- **Worktree-aware**: Phase 0 creates an isolated worktree. All subsequent phases work in the worktree directory. File paths must be relative (not absolute to the original project).
+- **Worktree-aware**: Phase 0 uses `EnterWorktree` to create an isolated worktree. The session's CWD is automatically switched — no explicit `cd` needed. File paths must be relative.
 - **Checkpointed**: Every phase ends with a commit + tag. The agent can be rolled back to any phase boundary.
 - **Verifiable**: Every phase ends with a concrete verification command. No "looks good" — use assert/grep/count checks.
 - **Sequential with gates**: Phase N+1 cannot start until Phase N verification passes.
@@ -137,20 +149,20 @@ Replace `<PROJECT_DIR>`, `<BRANCH>`, `<WORKTREE_DIR>`, and `<TASK_NAME>` with th
 - **Batch-safe**: For large changes (>30 items), specify batch size and per-batch validation.
 - **Time-bounded**: Include realistic time estimates per phase. Total should be achievable in one session (6-12 hours).
 - **Preserve invariants**: List what must NOT break (tests, existing features, file formats).
-- **Never touch the original directory**: All writes, edits, and git operations happen in the worktree. The original directory must remain on the base branch with zero modifications.
+- **Never touch the original directory**: `EnterWorktree` isolates all writes, edits, and git operations in the worktree. The original directory remains on the base branch with zero modifications.
 
 ### Do NOT include
 
 - Vague instructions ("improve the code", "make it better")
 - Steps that require human judgment mid-execution (the agent runs autonomously)
 - External dependencies that may not be available (APIs, services)
-- Changes outside the worktree directory (the original project directory must NEVER be modified)
+- Changes outside the worktree (the original project directory must NEVER be modified)
 - Phase 0 must NOT be skipped, reordered, or merged with Phase 1
 
 ## After generating
 
 1. Save the prompt to a file in the project root
 2. Show the user a summary: phases, estimated time, key risks
-3. Confirm the worktree path and branch name look correct
+3. Confirm the `EnterWorktree` name and task slug look correct
 4. List the rollback options available (phase-level, full discard)
 5. Ask if they want to adjust anything before the prompt is finalized
