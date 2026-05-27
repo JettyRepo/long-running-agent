@@ -83,6 +83,9 @@ echo "  Branch: $BRANCH (based on $(git rev-parse --short HEAD))"
 
 **CRITICAL**: After Phase 0, `EnterWorktree` has already switched the session's working directory to the worktree. All subsequent phases work in this directory automatically — no explicit `cd` needed. File paths in the prompt must be relative, not absolute to the original project directory.
 
+**On context compaction**: the session CWD may reset to the original project directory. Recovery procedure (include this verbatim in the generated prompt's Execution Mode block):
+> If context compaction occurs: call `EnterWorktree` again with the same `name: "lrap/<TASK_SLUG>"` to restore the worktree CWD, then re-read this file, run `git log --oneline -5`, and check `CURRENT_PHASE` to resume from the last completed phase.
+
 ### Phase checkpoint (insert at the end of every Phase 1–N, after verification passes)
 
 ```bash
@@ -93,47 +96,127 @@ git tag "lrap/${TASK_NAME}-phase-N"
 echo "✓ Checkpoint: lrap/${TASK_NAME}-phase-N"
 ```
 
-### Completion — Merge / Rollback Instructions (copy verbatim as the final section)
+### Completion Phase — Merge & Cleanup (copy verbatim as the FINAL mandatory phase)
+
+This phase runs automatically after all work phases pass verification. It exits the worktree, merges back to the base branch, and removes the worktree. It is MANDATORY — do not omit it.
+
+**Step 1 — Exit worktree and merge:**
+
+Call `ExitWorktree` to return the session CWD to the original project directory, then run:
+
+```bash
+TASK_NAME="<TASK_SLUG>"   # ← same value as Phase 0
+BRANCH=$(git worktree list | grep "lrap/${TASK_NAME}" | awk '{print $3}' | tr -d '[]')
+
+# Attempt merge
+if git merge "$BRANCH" --no-ff -m "chore(<TASK_SLUG>): merge <short description> — <summary>"; then
+    echo "✓ Merge succeeded"
+else
+    echo "✗ Merge has conflicts — stopping for manual resolution."
+    echo "  See Merge conflict protocol below."
+    exit 1
+fi
+```
+
+**Step 2 — Re-run inject / build steps if required by the project:**
+
+```bash
+# e.g.: python3 data/inject_html.py
+# Include project-specific post-merge steps here.
+```
+
+**Step 3 — Final verify:**
+
+```bash
+bash verify.sh 2>&1 | grep "FAIL\|PASS\|=== " | head -10
+```
+
+**Step 4 — Clean up worktree:**
+
+```bash
+git worktree remove ".claude/worktrees/lrap/${TASK_NAME}" 2>/dev/null \
+    || git worktree remove --force ".claude/worktrees/lrap/${TASK_NAME}"
+git branch -D "$BRANCH"
+echo "✓ LRAP complete. Branch $BRANCH merged into $(git branch --show-current)"
+echo "  To clean up tags: git tag -d \$(git tag -l 'lrap/${TASK_NAME}-*')"
+```
+
+---
+
+**Merge conflict protocol**: If step 1 exits non-zero, stop and report to the user. Do NOT force-merge or discard changes. Diagnose and resolve as follows:
+
+**Step A — Identify conflict types**
+```bash
+git status --short | grep "^UU\|^AA\|^DD\|^AU\|^UD\|^RR"
+```
+| Code | Meaning | Resolution |
+|------|---------|------------|
+| `UU` | Both modified (content conflict) | See below |
+| `AA` | Both added same filename | Usually keep `--ours`; re-run build if generated file |
+| `DD` | Both deleted | `git rm -f <file>` |
+| `AU` | Added in LRAP only | `git add <file>` to keep it |
+| `UD` | Deleted in LRAP, modified in master | Decide case by case |
+| `RR` | Rename/rename — each side renamed differently | See below |
+
+**Step B — Content conflicts (`UU`)**
+
+Categorize by file type before resolving:
+- **Generated / injected files** (any file rebuilt by a pipeline script): always `git checkout --ours <file>`, then **re-run the inject/build step** after the merge commit to pick up the LRAP's data changes.
+- **Source data files** (content the LRAP was specifically changing): usually `git checkout --theirs <file>` — the LRAP's changes are the whole point.
+- **Config / docs files** (`HANDOFF.md`, etc.): merge manually; prefer master's structure, graft in the LRAP's new section.
+
+```bash
+# Generated file — keep master, re-inject after commit
+git checkout --ours <generated-file>
+git add <generated-file>
+
+# Data file — keep LRAP
+git checkout --theirs <data-file>
+git add <data-file>
+```
+
+**Step C — Rename/rename conflicts (`RR`)**
+
+Occurs when master renamed a file one way and the LRAP renamed it another way.
+
+```bash
+# Both renames are correct — stage both, remove the original
+git add -f <master-renamed-file> <lrap-renamed-file>
+git rm -f <original-filename>   # the DD entry
+```
+
+If only one rename should survive, `git checkout --ours <file>` or `git checkout --theirs <file>` on the conflicted path, then `git rm` the unwanted copy.
+
+**Step D — Finish the merge**
+```bash
+# Confirm no unresolved conflicts remain
+git diff --check
+git status --short | grep "^UU\|^AA\|^DD\|^RR" && echo "STILL CONFLICTED" || echo "all resolved"
+
+# Commit the merge
+git commit   # uses the in-progress merge message
+
+# Re-run inject / build so generated files incorporate LRAP data
+# Amend the merge commit to include the rebuilt output
+git add <rebuilt-files>
+git commit --amend --no-edit
+```
+
+**Step E — Resume Completion Phase steps 2–4** (verify, worktree remove, cleanup).
+
+---
 
 ```markdown
-## After Completion
+## Rollback options (for human reference)
 
-All work is on the worktree branch. The original directory is completely untouched.
-The agent session will prompt to keep or remove the worktree on exit — choose **keep** to review before merging.
-
-### Find worktree branch and path
-    git worktree list
-    # Worktree: .claude/worktrees/lrap/<TASK_NAME>
-    # Note the branch name from the output
-
-### Accept all changes (merge into base branch)
-    BRANCH=$(git -C .claude/worktrees/lrap/<TASK_NAME> branch --show-current)
-    git merge "$BRANCH"
-    git worktree remove .claude/worktrees/lrap/<TASK_NAME>
-    git branch -D "$BRANCH"
-    # optional: clean up tags
-    git tag -d $(git tag -l 'lrap/<TASK_NAME>-*')
-
-### Accept all changes as a single squashed commit
-    BRANCH=$(git -C .claude/worktrees/lrap/<TASK_NAME> branch --show-current)
-    git merge --squash "$BRANCH"
-    git commit -m "feat: <description>"
-    git worktree remove .claude/worktrees/lrap/<TASK_NAME>
-    git branch -D "$BRANCH"
-
-### Roll back to a specific phase (e.g. keep Phase 1-2, discard Phase 3+)
+### Roll back to a specific phase (keep Phase 1-2, discard Phase 3+)
     cd .claude/worktrees/lrap/<TASK_NAME>
     git reset --hard lrap/<TASK_NAME>-phase-2
-    # Then continue working from Phase 2, or merge this state
 
-### Discard everything (full rollback)
+### Discard everything
     git worktree remove --force .claude/worktrees/lrap/<TASK_NAME>
-    # Branch name from `git worktree list` above
     git branch -D <BRANCH>
     git tag -d $(git tag -l 'lrap/<TASK_NAME>-*')
-
-### Inspect side-by-side
-    diff -rq . .claude/worktrees/lrap/<TASK_NAME> --exclude=node_modules --exclude=.git
 ```
 
 Replace `<TASK_NAME>` and `<BRANCH>` with actual values. `<TASK_NAME>` is the slug from Phase 0. `<BRANCH>` is auto-generated by `EnterWorktree` — obtain it via `git worktree list`.
@@ -141,7 +224,7 @@ Replace `<TASK_NAME>` and `<BRANCH>` with actual values. `<TASK_NAME>` is the sl
 ### Writing principles
 
 - **Self-contained**: The agent has never seen this project. Include all necessary context (file paths, schemas, field names, current values).
-- **Worktree-aware**: Phase 0 uses `EnterWorktree` to create an isolated worktree. The session's CWD is automatically switched — no explicit `cd` needed. File paths must be relative.
+- **Worktree-aware**: Phase 0 uses `EnterWorktree` to create an isolated worktree. The session's CWD is automatically switched — no explicit `cd` needed. File paths must be relative. Include a context-compaction recovery note in the Execution Mode block: call `EnterWorktree` again with the same name to restore the CWD.
 - **Checkpointed**: Every phase ends with a commit + tag. The agent can be rolled back to any phase boundary.
 - **Verifiable**: Every phase ends with a concrete verification command. No "looks good" — use assert/grep/count checks.
 - **Sequential with gates**: Phase N+1 cannot start until Phase N verification passes.
